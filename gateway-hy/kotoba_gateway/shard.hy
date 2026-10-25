@@ -15,6 +15,7 @@
 ;;            multiplexer is live, so no job can run twice.
 
 (import heapq json os sqlite3 sys threading time
+        pathlib [Path]
         collections [deque]
         concurrent.futures [ThreadPoolExecutor]
         datetime [datetime timezone timedelta])
@@ -148,7 +149,7 @@
                   [housekeeping-seconds DEFAULT-HOUSEKEEPING-SECONDS]
                   [clock time.time]
                   [heartbeat-fn None]
-                  [allow None] [reserved-profiles None]]
+                  [allow None] [reserved-profiles None] [before-tick None]]
     (when (not-in mode #{"observe" "run"})
       (raise (ValueError f"unknown shard mode {mode}")))
     (setv self.index index
@@ -165,6 +166,9 @@
           ;; profile's lease now. Checked when scheduling AND right before a
           ;; tick, so a lease lost between the two is never acted on.
           self.allow (or allow (fn [name] True))
+          ;; (before-tick name home), e.g. drop a profile's cached secrets
+          ;; when its short-lived GitHub lease is about to end.
+          self.before-tick before-tick
           self.reserved-profiles (set (or reserved-profiles []))
           self.closed False
           self.stop-event None
@@ -285,6 +289,10 @@
     (setv entry (.get self.index.entries name)
           t0 (time.perf_counter)
           error None)
+    (when (and entry self.before-tick)
+      (try (self.before-tick name (get entry "home"))
+           (except [e Exception]
+             (print f"[kotoba-shard] before-tick {name} failed: {e !r}" :file sys.stderr))))
     (try
       (when entry (self.tick-fn name (get entry "home")))
       (except [e Exception]
@@ -414,6 +422,19 @@
       (if (is error None)
           (clear_ticker_error)
           (record_ticker_error error)))))
+
+(defn upstream-secret-refresh [due-fn]
+  "before-tick hook: when (due-fn profile) says the profile's lease ends soon,
+  drop upstream's per-home secret-source cache so the next tick runs the
+  secrets.command helper again (upstream caches it for the process lifetime)."
+  (import hermes_cli.env_loader :as el
+          kotoba_gateway.fleet_secrets [profile-of-home])
+  (fn [name home]
+    (when (due-fn (profile-of-home home))
+      (setv key (str (.resolve (Path home))))
+      (with [el._SECRET_SOURCE_CACHE_LOCK]
+        (.discard el._APPLIED_HOMES key)
+        (.pop el._SECRET_SOURCE_VALUES_BY_HOME key None)))))
 
 (defn live-multiplexer [hermes-home]
   "The upstream multiplexer's pid when its gateway_state.json says it is

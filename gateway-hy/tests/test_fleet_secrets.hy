@@ -1,10 +1,11 @@
 ;; Fleet secrets via kagi: kagi is replaced by a fake runner standing in for
 ;; `kagi agent get`, which returns a value only for items granted to the node.
 
-(import os types unittest
+(import os tempfile types unittest
         kotoba_gateway.fleet_secrets [FLEET-ITEM item-name profile-of-home parse-env
                                       merge-envs kagi-get profile-env
-                                      secrets-command-block with-secrets-command])
+                                      secrets-command-block with-secrets-command
+                                      lease-env lease-refresh-due])
 
 (setv CFG {"kagi_bin" "/k/bin/kagi" "kagi_home" "/k/home"
            "identity_ref" "file:///k/id" "agent_id" "agent-1"})
@@ -72,3 +73,37 @@
 
 (when (= __name__ "__main__")
   (unittest.main))
+
+(defclass Leases [unittest.TestCase]
+  (defn setUp [self] (setv self.tmp (tempfile.TemporaryDirectory)))
+  (defn tearDown [self] (.cleanup self.tmp))
+
+  ;; @lat: [[profile-distribution#Fleet secrets#Tests#A GitHub lease becomes GH_TOKEN and its expiry is remembered]]
+  (defn test-lease-env [self]
+    (setv calls []
+          cfg {#** CFG "github_lease" {"from" "http://minter:8978/v1/lease" "access" "contents:read"
+                                       "resources" ["cloud-itonami/*"]}})
+    (defn run [argv #** kw]
+      (.append calls argv)
+      (if (= (get argv 2) "request")
+          (types.SimpleNamespace :returncode 0 :stderr ""
+                                 :stdout "{:status :issued, :lease {:lease/id \"lease-7\", :lease/expires-at 1791603600}}\n")
+          (types.SimpleNamespace :returncode 0 :stderr "" :stdout "ghs_TOKEN")))
+    (.assertEqual self (lease-env cfg "p1" :run run :state-dir self.tmp.name)
+                  {"GH_TOKEN" "ghs_TOKEN" "GITHUB_TOKEN" "ghs_TOKEN"})
+    (.assertEqual self (cut (get calls 0) 1 None)
+                  ["lease" "request" "--from" "http://minter:8978/v1/lease" "--access" "contents:read"
+                   "--resources" "cloud-itonami/*" "--purpose" "hermes-cron:p1"])
+    (.assertEqual self (get calls 1) ["/k/bin/kagi" "lease" "open" "--lease" "lease-7"])
+    ;; the expiry drives the cache drop: due within ten minutes of the end
+    (.assertFalse self (lease-refresh-due "p1" :now (- 1791603600 3000) :state-dir self.tmp.name))
+    (.assertTrue self (lease-refresh-due "p1" :now (- 1791603600 300) :state-dir self.tmp.name))
+    (.assertFalse self (lease-refresh-due "never-leased" :now 0 :state-dir self.tmp.name)))
+
+  ;; @lat: [[profile-distribution#Fleet secrets#Tests#A pending or denied lease does not stop the profile]]
+  (defn test-lease-not-issued [self]
+    (setv cfg {#** CFG "github_lease" {"from" "http://m" "resources" "cloud-itonami/*"}})
+    (defn run [argv #** kw]
+      (types.SimpleNamespace :returncode 0 :stderr "" :stdout "{:status :pending, :request-id \"req-1\"}"))
+    (.assertEqual self (lease-env cfg "p1" :run run :state-dir self.tmp.name) {})
+    (.assertEqual self (lease-env CFG "p1" :run run :state-dir self.tmp.name) {} "no github_lease: no lease")))

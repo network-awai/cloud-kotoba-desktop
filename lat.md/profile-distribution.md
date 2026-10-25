@@ -324,6 +324,8 @@ Node side: a staged profile's `config.yaml` gets `secrets.command` pointing at `
 
 Verified on joseph (2026-10-10): `hermes cron tick` logged `Command helper: applied 4 secrets`, and a script job saw the three non-provider keys set. Upstream strips `OPENROUTER_API_KEY` from script environments on purpose; agent turns still resolve it through the scope.
 
+GitHub access comes from the kagi credential broker (kagi ADR-0003): a node whose node.json has `github_lease` {from, access, resources} gets a GitHub App installation token of at most one hour, sealed to its own key, as `GH_TOKEN`. Upstream caches the helper's output for the process lifetime, so the shard host's before-tick hook drops a profile's cached secrets ten minutes before its lease ends (`lease-refresh-due` in `gateway-hy/kotoba_gateway/fleet_secrets.hy` is the check), and the next tick asks again.
+
 Limits: a revoked node keeps values it already read, so rotate after a compromise. Upstream caches the helper's result per home for the process lifetime, so a rotated value reaches a node at its next gateway restart.
 
 kagi needed one fix for this: `agent approve` read request files with a parser capped at 4,096-character tokens, shorter than the post-quantum public keys in every request (kotoba-lang/kagi#39).
@@ -339,6 +341,14 @@ The helper asks kagi for `hermes-env.fleet` and `hermes-env.<profile>` with the 
 #### A kagi failure is an error, not an empty env
 
 Any `kagi agent get` failure other than an absent item raises, so the helper exits non-zero and upstream records the source as failed and retries, instead of running the job without its secrets.
+
+#### A GitHub lease becomes GH_TOKEN and its expiry is remembered
+
+With `github_lease` in node.json the helper asks the broker (`kagi lease request --from …`), opens the lease with the node's key, returns it as `GH_TOKEN`/`GITHUB_TOKEN`, and writes its expiry so the shard host knows when to refresh.
+
+#### A pending or denied lease does not stop the profile
+
+A lease that needs the owner's approval or is refused leaves the profile without a GitHub token instead of failing its secrets, and the reason goes to stderr. Nodes without `github_lease` ask for nothing.
 
 #### Staging a profile adds the kagi helper and keeps other secret sources
 
@@ -401,6 +411,10 @@ The node key moves from HERMES_HOME to its `~/.kotoba/homes/<id>` directory once
 #### A profiles/default directory never shadows the root home
 
 With both a root `cron/jobs.json` and a `profiles/default` directory, the `default` entry is the root home, and the host heartbeat goes to the root home.
+
+#### The before-tick hook runs before each tick and cannot block it
+
+The shard host calls `before-tick` with the profile and home right before its tick; an exception from the hook is logged and the tick still runs.
 
 #### The host heartbeat survives slow passes but not a wedged loop
 

@@ -46,7 +46,8 @@
         kotoba_gateway.runs [RunRegistry run-event TERMINAL-STATUSES]
         kotoba_gateway.placement [Placement]
         kotoba_gateway.shard [ProfileIndex ShardHost cost-report live-multiplexer
-                              upstream-heartbeat upstream-tick])
+                              upstream-heartbeat upstream-tick upstream-secret-refresh]
+        kotoba_gateway.fleet_secrets [lease-refresh-due load-node-config])
 
 (setv MAX-BODY-BYTES (* 32 1024 1024)
       KEEPALIVE-SECONDS 15
@@ -729,6 +730,14 @@
 
 (setv NODE-STATE-FILES ["kotoba-node.key" "kotoba-heads.json" "kotoba-peers.json" "kotoba-blocks"])
 
+(defn lease-refresh-hook []
+  "before-tick hook for nodes whose node.json asks for GitHub leases; None
+  elsewhere (no kagi agent, or no `github_lease`), so nothing changes there."
+  (try
+    (when (.get (load-node-config) "github_lease")
+      (upstream-secret-refresh lease-refresh-due))
+    (except [[OSError ValueError]] None)))
+
 (defn default-state-dir [hermes-home]
   "Node identity, ledger and peers live under ~/.kotoba/homes/<id>, outside
   the Hermes-managed home: on 2026-10-09 the node key written to HERMES_HOME
@@ -809,7 +818,8 @@
                                    :reserved-profiles args.reserved_cron_profile
                                    :rescan-seconds args.shard-rescan-seconds
                                    :heartbeat-fn (when (= args.shard "run") (upstream-heartbeat))
-                                   :allow (when placement (fn [name] (.allows placement name)))))
+                                   :allow (when placement (fn [name] (.allows placement name)))
+                                   :before-tick (when (= args.shard "run") (lease-refresh-hook))))
     (when placement
       (setv placement.on-change (fn [_] (.reapply-leases gateway.shard))))
     (.start gateway.shard)

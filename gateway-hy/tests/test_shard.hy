@@ -233,6 +233,20 @@
     (.host-heartbeat host clock.t)
     (.assertEqual self beats [T0 clock.t])))
 
+(defclass BeforeTick [Fixture]
+  ;; @lat: [[profile-distribution#Shard host implementation#Tests#The before-tick hook runs before each tick and cannot block it]]
+  (defn test-before-tick [self]
+    (.profile self "ok" [(job (- T0 1))])
+    (setv order [])
+    (defn tick-fn [name home] (.append order ["tick" name]) (write-jobs home [(job (+ T0 86400))]))
+    (defn hook [name home] (.append order ["before" name]) (raise (RuntimeError "hook down")))
+    (setv host (ShardHost (ProfileIndex self.home) tick-fn :mode "run" :max-turns 1
+                          :rescan-seconds 30 :housekeeping-seconds 1e9 :clock (Clock T0)
+                          :before-tick hook))
+    (.step host)
+    (.shutdown host.pool :wait True)
+    (.assertEqual self order [["before" "ok"] ["tick" "ok"]])))
+
 (defclass NodeState [Fixture]
   ;; @lat: [[profile-distribution#Shard host implementation#Tests#Node state lives outside HERMES_HOME]]
   (defn test-node-state-moves-out [self]
